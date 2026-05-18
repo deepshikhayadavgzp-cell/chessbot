@@ -3,15 +3,16 @@ from discord.ext import commands, tasks
 import aiohttp
 import json
 import os
+from datetime import datetime
 from dotenv import load_dotenv
-load_dotenv()
-from datetime import datetime, time
 
-TOKEN              = os.getenv("DISCORD_TOKEN")
+load_dotenv()
+
+TOKEN                  = os.getenv("DISCORD_TOKEN")
 LEADERBOARD_CHANNEL_ID = int(os.getenv("LEADERBOARD_CHANNEL_ID", "0"))
-POST_HOUR          = int(os.getenv("POST_HOUR", "20"))
-POST_MINUTE        = int(os.getenv("POST_MINUTE", "0"))
-MEMBERS_FILE       = "members.json"
+MEMBERS_FILE           = "members.json"
+
+leaderboard_message = None
 
 def load_members():
     if os.path.exists(MEMBERS_FILE):
@@ -65,29 +66,37 @@ async def build_leaderboard_embed(members):
         color=0x4a90d9,
         timestamp=datetime.utcnow()
     )
-    embed.set_footer(text="Lichess Rapid Rating  •  Updates daily")
+    embed.set_footer(text="Lichess Rapid Rating  •  Live — updates every 2 minutes")
     return embed, None
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-@tasks.loop(time=time(hour=POST_HOUR, minute=POST_MINUTE))
-async def daily_leaderboard():
+@tasks.loop(minutes=2)
+async def live_leaderboard():
+    global leaderboard_message
     channel = bot.get_channel(LEADERBOARD_CHANNEL_ID)
     if not channel:
         return
     members = load_members()
     embed, error = await build_leaderboard_embed(members)
-    if embed:
-        await channel.send(embed=embed)
-    else:
-        await channel.send(f"⚠️ {error}")
+    if not embed:
+        return
+    try:
+        if leaderboard_message:
+            await leaderboard_message.edit(embed=embed)
+        else:
+            leaderboard_message = await channel.send(embed=embed)
+    except discord.NotFound:
+        leaderboard_message = await channel.send(embed=embed)
+    except Exception as e:
+        print(f"Leaderboard update error: {e}")
 
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
-    daily_leaderboard.start()
+    live_leaderboard.start()
 
 @bot.command(name="joinleaderboard")
 async def join_leaderboard(ctx, lichess_username: str):
@@ -158,12 +167,12 @@ async def remove_member(ctx, lichess_username: str):
 @bot.command(name="chesshelp")
 async def chess_help(ctx):
     embed = discord.Embed(title="♟️ Chess Squad Bot — Commands", color=0x4a90d9)
-    embed.add_field(name="!joinleaderboard <username>", value="Add your Lichess account",         inline=False)
-    embed.add_field(name="!leaderboard",                value="Show current leaderboard",          inline=False)
-    embed.add_field(name="!members",                    value="List all registered members",       inline=False)
-    embed.add_field(name="!addmember <username>",       value="[Squad Lead] Add a member",         inline=False)
-    embed.add_field(name="!removemember <username>",    value="[Squad Lead] Remove a member",      inline=False)
-    embed.set_footer(text="Leaderboard auto-posts daily • Lichess Rapid Rating")
+    embed.add_field(name="!joinleaderboard <username>", value="Add your Lichess account",      inline=False)
+    embed.add_field(name="!leaderboard",                value="Show current leaderboard",       inline=False)
+    embed.add_field(name="!members",                    value="List all registered members",    inline=False)
+    embed.add_field(name="!addmember <username>",       value="[Squad Lead] Add a member",      inline=False)
+    embed.add_field(name="!removemember <username>",    value="[Squad Lead] Remove a member",   inline=False)
+    embed.set_footer(text="Live leaderboard updates every 2 min • Lichess Rapid Rating")
     await ctx.send(embed=embed)
 
 @add_member.error
@@ -171,6 +180,12 @@ async def chess_help(ctx):
 async def permission_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
         await ctx.send("❌ Only the squad lead can use this command.")
+
+@join_leaderboard.error
+@add_member.error
+async def missing_arg_error(ctx, error):
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("❌ Please provide a Lichess username. Example: `!joinleaderboard YourLichessName`")
 
 if __name__ == "__main__":
     bot.run(TOKEN)
