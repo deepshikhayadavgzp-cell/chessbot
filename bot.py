@@ -133,7 +133,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-@tasks.loop(minutes=10)
+@tasks.loop(minutes=1)
 async def live_leaderboard():
     data = load_data()
     for guild_id, guild_data in data.items():
