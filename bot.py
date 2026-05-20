@@ -168,44 +168,43 @@ async def monthly_reset_and_announce():
     data = load_data()
     for guild_id, guild_data in data.items():
         channel_id = guild_data.get("channel_id")
-        if not channel_id:
-            continue
-        channel = bot.get_channel(int(channel_id))
-        if not channel:
-            continue
         members = guild_data.get("members", {})
         if not members:
             continue
 
-        # Announce winner
-        gains = []
-        async with aiohttp.ClientSession() as session:
-            for v in members.values():
-                username = v["username"]
-                start = v.get("start_rating")
-                current = await get_rating(session, username)
-                if start and current:
-                    gains.append({"username": username, "gain": current - start, "current": current})
+        # Only announce winner if it's not June (June is the first month so nothing to announce)
+        is_first_month = (now.month == 6 and now.year == 2026)
 
-        if gains:
-            gains.sort(key=lambda x: x["gain"], reverse=True)
-            winner = gains[0]
-            sign = "+" if winner["gain"] >= 0 else ""
-            embed = discord.Embed(
-                title="🎉 Monthly ELO Gain Winner! 🎉",
-                description=(
-                    f"🥳 Congratulations to **{winner['username']}**!\n\n"
-                    f"🏆 Most ELO gained this month: **{sign}{winner['gain']}** ELO\n"
-                    f"📊 Current rating: **{winner['current']}**\n\n"
-                    f"✨ 🎊 🎆 🎇 ✨ 🎊 🎆 🎇 ✨"
-                ),
-                color=0xf1c40f,
-                timestamp=datetime.now(timezone.utc)
-            )
-            embed.set_footer(text="See you next month! Keep climbing! ♟️")
-            await channel.send(embed=embed)
+        if not is_first_month and channel_id:
+            channel = bot.get_channel(int(channel_id))
+            if channel:
+                gains = []
+                async with aiohttp.ClientSession() as session:
+                    for v in members.values():
+                        username = v["username"]
+                        start = v.get("start_rating")
+                        current = await get_rating(session, username)
+                        if start and current:
+                            gains.append({"username": username, "gain": current - start, "current": current})
+                if gains:
+                    gains.sort(key=lambda x: x["gain"], reverse=True)
+                    winner = gains[0]
+                    sign = "+" if winner["gain"] >= 0 else ""
+                    embed = discord.Embed(
+                        title="🎉 Monthly ELO Gain Winner! 🎉",
+                        description=(
+                            f"🥳 Congratulations to **{winner['username']}**!\n\n"
+                            f"🏆 Most ELO gained this month: **{sign}{winner['gain']}** ELO\n"
+                            f"📊 Current rating: **{winner['current']}**\n\n"
+                            f"✨ 🎊 🎆 🎇 ✨ 🎊 🎆 🎇 ✨"
+                        ),
+                        color=0xf1c40f,
+                        timestamp=datetime.now(timezone.utc)
+                    )
+                    embed.set_footer(text="See you next month! Keep climbing! ♟️")
+                    await channel.send(embed=embed)
 
-        # Reset start ratings for new month
+        # Reset start ratings for everyone
         async with aiohttp.ClientSession() as session:
             for v in members.values():
                 new_rating = await get_rating(session, v["username"])
