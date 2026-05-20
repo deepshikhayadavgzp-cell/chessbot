@@ -40,7 +40,7 @@ async def get_rating(session, username):
         pass
     return None
 
-async def fetch_ratings_bulk(usernames):
+async def fetch_ratings_bulk(usernames, mode="rapid"):
     results = []
     async with aiohttp.ClientSession() as session:
         try:
@@ -53,7 +53,7 @@ async def fetch_ratings_bulk(usernames):
                 if resp.status == 200:
                     users = await resp.json()
                     for user in users:
-                        rating = user.get("perfs", {}).get("rapid", {}).get("rating", None)
+                        rating = user.get("perfs", {}).get(mode, {}).get("rating", None)
                         results.append({
                             "username": user["username"],
                             "rating": rating if rating else "Unrated"
@@ -63,12 +63,12 @@ async def fetch_ratings_bulk(usernames):
     results.sort(key=lambda x: x["rating"] if isinstance(x["rating"], int) else -1, reverse=True)
     return results
 
-async def build_leaderboard_embed(guild_data):
+async def build_leaderboard_embed(guild_data, mode="rapid"):
     members = guild_data.get("members", {})
     if not members:
         return None, "No members registered yet."
     usernames = [v["username"] for v in members.values()]
-    ratings = await fetch_ratings_bulk(usernames)
+    ratings = await fetch_ratings_bulk(usernames, mode)
     if not ratings:
         return None, "Could not fetch ratings from Lichess."
     medals = ["🥇", "🥈", "🥉"]
@@ -77,10 +77,11 @@ async def build_leaderboard_embed(guild_data):
         rank = medals[i] if i < 3 else f"`#{i+1}`"
         rating_display = str(entry["rating"]) if entry["rating"] != "Unrated" else "—"
         start = None
-        for v in members.values():
-            if v["username"].lower() == entry["username"].lower():
-                start = v.get("start_rating")
-                break
+        if mode == "rapid":
+            for v in members.values():
+                if v["username"].lower() == entry["username"].lower():
+                    start = v.get("start_rating")
+                    break
         if start and isinstance(entry["rating"], int):
             diff = entry["rating"] - start
             sign = "+" if diff >= 0 else ""
@@ -88,13 +89,14 @@ async def build_leaderboard_embed(guild_data):
         else:
             gain = ""
         lines.append(f"{rank} **{entry['username']}** — {rating_display}{gain}")
+    mode_display = mode.capitalize()
     embed = discord.Embed(
-        title="♟️ Anime Soul Chess Squad — Leaderboard",
+        title=f"♟️ Anime Soul Chess Squad — {mode_display} Leaderboard",
         description="\n".join(lines),
         color=0x4a90d9,
         timestamp=datetime.now(timezone.utc)
     )
-    embed.set_footer(text="Lichess Rapid Rating  •  Live — updates every 10 minutes")
+    embed.set_footer(text=f"Lichess {mode_display} Rating  •  Live — updates every 10 minutes")
     return embed, None
 
 async def build_gain_embed(guild_data):
@@ -172,7 +174,6 @@ async def monthly_reset_and_announce():
         if not members:
             continue
 
-        # Only announce winner if it's not June (June is the first month so nothing to announce)
         is_first_month = (now.month == 6 and now.year == 2026)
 
         if not is_first_month and channel_id:
@@ -204,7 +205,6 @@ async def monthly_reset_and_announce():
                     embed.set_footer(text="See you next month! Keep climbing! ♟️")
                     await channel.send(embed=embed)
 
-        # Reset start ratings for everyone
         async with aiohttp.ClientSession() as session:
             for v in members.values():
                 new_rating = await get_rating(session, v["username"])
@@ -251,7 +251,29 @@ async def show_leaderboard(ctx):
     data = load_data()
     guild_data = get_guild_data(data, ctx.guild.id)
     async with ctx.typing():
-        embed, error = await build_leaderboard_embed(guild_data)
+        embed, error = await build_leaderboard_embed(guild_data, mode="rapid")
+    if embed:
+        await ctx.send(embed=embed)
+    else:
+        await ctx.send(f"⚠️ {error}")
+
+@bot.command(name="blitzleaderboard")
+async def show_blitz_leaderboard(ctx):
+    data = load_data()
+    guild_data = get_guild_data(data, ctx.guild.id)
+    async with ctx.typing():
+        embed, error = await build_leaderboard_embed(guild_data, mode="blitz")
+    if embed:
+        await ctx.send(embed=embed)
+    else:
+        await ctx.send(f"⚠️ {error}")
+
+@bot.command(name="bulletleaderboard")
+async def show_bullet_leaderboard(ctx):
+    data = load_data()
+    guild_data = get_guild_data(data, ctx.guild.id)
+    async with ctx.typing():
+        embed, error = await build_leaderboard_embed(guild_data, mode="bullet")
     if embed:
         await ctx.send(embed=embed)
     else:
@@ -319,7 +341,9 @@ async def chess_help(ctx):
     embed = discord.Embed(title="♟️ Chess Squad Bot — Commands", color=0x4a90d9)
     embed.add_field(name="!setchannel",                 value="[Admin] Set leaderboard channel",  inline=False)
     embed.add_field(name="!joinleaderboard <username>", value="Add your Lichess account",          inline=False)
-    embed.add_field(name="!leaderboard",                value="Show current leaderboard",          inline=False)
+    embed.add_field(name="!leaderboard",                value="Show Rapid leaderboard",            inline=False)
+    embed.add_field(name="!blitzleaderboard",           value="Show Blitz leaderboard",            inline=False)
+    embed.add_field(name="!bulletleaderboard",          value="Show Bullet leaderboard",           inline=False)
     embed.add_field(name="!gainleaderboard",            value="Show ELO gained this month",        inline=False)
     embed.add_field(name="!members",                    value="List all registered members",       inline=False)
     embed.add_field(name="!addmember <username>",       value="[Admin] Add a member",              inline=False)
