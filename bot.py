@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands, tasks
+from discord import app_commands
 import aiohttp
 import json
 import os
@@ -8,8 +9,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-TOKEN        = os.getenv("DISCORD_TOKEN")
-DATA_FILE    = "data.json"
+TOKEN     = os.getenv("DISCORD_TOKEN")
+DATA_FILE = "data.json"
 
 def load_data():
     if os.path.exists(DATA_FILE):
@@ -96,7 +97,7 @@ async def build_leaderboard_embed(guild_data, mode="rapid"):
         color=0x4a90d9,
         timestamp=datetime.now(timezone.utc)
     )
-    embed.set_footer(text=f"Lichess {mode_display} Rating  •  Live — updates every 10 minutes")
+    embed.set_footer(text=f"Lichess {mode_display} Rating  •  Live — updates every 1 minute")
     return embed, None
 
 async def build_gain_embed(guild_data):
@@ -215,155 +216,154 @@ async def monthly_reset_and_announce():
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
+    await bot.tree.sync()
     live_leaderboard.start()
     monthly_reset_and_announce.start()
 
-@bot.command(name="setchannel")
-@commands.has_permissions(manage_guild=True)
-async def set_channel(ctx):
+@bot.tree.command(name="setchannel", description="Set this channel as the leaderboard channel")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def set_channel(interaction: discord.Interaction):
     data = load_data()
-    guild_data = get_guild_data(data, ctx.guild.id)
-    guild_data["channel_id"] = str(ctx.channel.id)
+    guild_data = get_guild_data(data, interaction.guild.id)
+    guild_data["channel_id"] = str(interaction.channel.id)
     guild_data["leaderboard_message_id"] = None
     save_data(data)
-    await ctx.send(f"✅ Leaderboard channel set to {ctx.channel.mention}!")
+    await interaction.response.send_message(f"✅ Leaderboard channel set to {interaction.channel.mention}!")
 
-@bot.command(name="joinleaderboard")
-async def join_leaderboard(ctx, lichess_username: str):
+@bot.tree.command(name="joinleaderboard", description="Join the leaderboard with your Lichess username")
+@app_commands.describe(lichess_username="Your Lichess username")
+async def join_leaderboard(interaction: discord.Interaction, lichess_username: str):
+    await interaction.response.defer()
     data = load_data()
-    guild_data = get_guild_data(data, ctx.guild.id)
+    guild_data = get_guild_data(data, interaction.guild.id)
     members = guild_data["members"]
     username_lower = lichess_username.lower()
     if any(v["username"] == username_lower for v in members.values()):
-        await ctx.send(f"⚠️ **{lichess_username}** is already on the leaderboard.")
+        await interaction.followup.send(f"⚠️ **{lichess_username}** is already on the leaderboard.")
         return
     async with aiohttp.ClientSession() as session:
         rating = await get_rating(session, username_lower)
         if rating is None:
-            await ctx.send(f"❌ Could not find **{lichess_username}** on Lichess.")
+            await interaction.followup.send(f"❌ Could not find **{lichess_username}** on Lichess.")
             return
-    members[str(ctx.author.id)] = {"username": username_lower, "start_rating": rating}
+    members[str(interaction.user.id)] = {"username": username_lower, "start_rating": rating}
     save_data(data)
-    await ctx.send(f"✅ {ctx.author.mention} joined as **{lichess_username}**! Starting rating: **{rating}**")
+    await interaction.followup.send(f"✅ {interaction.user.mention} joined as **{lichess_username}**! Starting rating: **{rating}**")
 
-@bot.command(name="leaderboard")
-async def show_leaderboard(ctx):
+@bot.tree.command(name="leaderboard", description="Show the Rapid rating leaderboard")
+async def show_leaderboard(interaction: discord.Interaction):
+    await interaction.response.defer()
     data = load_data()
-    guild_data = get_guild_data(data, ctx.guild.id)
-    async with ctx.typing():
-        embed, error = await build_leaderboard_embed(guild_data, mode="rapid")
+    guild_data = get_guild_data(data, interaction.guild.id)
+    embed, error = await build_leaderboard_embed(guild_data, mode="rapid")
     if embed:
-        await ctx.send(embed=embed)
+        await interaction.followup.send(embed=embed)
     else:
-        await ctx.send(f"⚠️ {error}")
+        await interaction.followup.send(f"⚠️ {error}")
 
-@bot.command(name="blitzleaderboard")
-async def show_blitz_leaderboard(ctx):
+@bot.tree.command(name="blitzleaderboard", description="Show the Blitz rating leaderboard")
+async def show_blitz_leaderboard(interaction: discord.Interaction):
+    await interaction.response.defer()
     data = load_data()
-    guild_data = get_guild_data(data, ctx.guild.id)
-    async with ctx.typing():
-        embed, error = await build_leaderboard_embed(guild_data, mode="blitz")
+    guild_data = get_guild_data(data, interaction.guild.id)
+    embed, error = await build_leaderboard_embed(guild_data, mode="blitz")
     if embed:
-        await ctx.send(embed=embed)
+        await interaction.followup.send(embed=embed)
     else:
-        await ctx.send(f"⚠️ {error}")
+        await interaction.followup.send(f"⚠️ {error}")
 
-@bot.command(name="bulletleaderboard")
-async def show_bullet_leaderboard(ctx):
+@bot.tree.command(name="bulletleaderboard", description="Show the Bullet rating leaderboard")
+async def show_bullet_leaderboard(interaction: discord.Interaction):
+    await interaction.response.defer()
     data = load_data()
-    guild_data = get_guild_data(data, ctx.guild.id)
-    async with ctx.typing():
-        embed, error = await build_leaderboard_embed(guild_data, mode="bullet")
+    guild_data = get_guild_data(data, interaction.guild.id)
+    embed, error = await build_leaderboard_embed(guild_data, mode="bullet")
     if embed:
-        await ctx.send(embed=embed)
+        await interaction.followup.send(embed=embed)
     else:
-        await ctx.send(f"⚠️ {error}")
+        await interaction.followup.send(f"⚠️ {error}")
 
-@bot.command(name="gainleaderboard")
-async def show_gain_leaderboard(ctx):
+@bot.tree.command(name="gainleaderboard", description="Show who gained the most ELO this month")
+async def show_gain_leaderboard(interaction: discord.Interaction):
+    await interaction.response.defer()
     data = load_data()
-    guild_data = get_guild_data(data, ctx.guild.id)
-    async with ctx.typing():
-        embed, error = await build_gain_embed(guild_data)
+    guild_data = get_guild_data(data, interaction.guild.id)
+    embed, error = await build_gain_embed(guild_data)
     if embed:
-        await ctx.send(embed=embed)
+        await interaction.followup.send(embed=embed)
     else:
-        await ctx.send(f"⚠️ {error}")
+        await interaction.followup.send(f"⚠️ {error}")
 
-@bot.command(name="members")
-async def list_members(ctx):
+@bot.tree.command(name="members", description="List all registered members")
+async def list_members(interaction: discord.Interaction):
     data = load_data()
-    guild_data = get_guild_data(data, ctx.guild.id)
+    guild_data = get_guild_data(data, interaction.guild.id)
     members = guild_data.get("members", {})
     if not members:
-        await ctx.send("No members yet. Use `!joinleaderboard <lichess_username>` to join.")
+        await interaction.response.send_message("No members yet. Use `/joinleaderboard` to join.")
         return
     names = "\n".join([f"• {v['username']}" for v in sorted(members.values(), key=lambda x: x['username'])])
     embed = discord.Embed(title="♟️ Registered Squad Members", description=names, color=0x1a1a2e)
     embed.set_footer(text=f"{len(members)} members total")
-    await ctx.send(embed=embed)
+    await interaction.response.send_message(embed=embed)
 
-@bot.command(name="addmember")
-@commands.has_permissions(manage_messages=True)
-async def add_member(ctx, lichess_username: str):
+@bot.tree.command(name="addmember", description="Add a member to the leaderboard")
+@app_commands.describe(lichess_username="Lichess username to add")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def add_member(interaction: discord.Interaction, lichess_username: str):
+    await interaction.response.defer()
     data = load_data()
-    guild_data = get_guild_data(data, ctx.guild.id)
+    guild_data = get_guild_data(data, interaction.guild.id)
     members = guild_data["members"]
     username_lower = lichess_username.lower()
     if any(v["username"] == username_lower for v in members.values()):
-        await ctx.send(f"⚠️ **{lichess_username}** is already on the leaderboard.")
+        await interaction.followup.send(f"⚠️ **{lichess_username}** is already on the leaderboard.")
         return
     async with aiohttp.ClientSession() as session:
         rating = await get_rating(session, username_lower)
         if rating is None:
-            await ctx.send(f"❌ Could not find **{lichess_username}** on Lichess.")
+            await interaction.followup.send(f"❌ Could not find **{lichess_username}** on Lichess.")
             return
     members[username_lower] = {"username": username_lower, "start_rating": rating}
     save_data(data)
-    await ctx.send(f"✅ **{lichess_username}** added! Starting rating: **{rating}**")
+    await interaction.followup.send(f"✅ **{lichess_username}** added! Starting rating: **{rating}**")
 
-@bot.command(name="removemember")
-@commands.has_permissions(manage_messages=True)
-async def remove_member(ctx, lichess_username: str):
+@bot.tree.command(name="removemember", description="Remove a member from the leaderboard")
+@app_commands.describe(lichess_username="Lichess username to remove")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def remove_member(interaction: discord.Interaction, lichess_username: str):
     data = load_data()
-    guild_data = get_guild_data(data, ctx.guild.id)
+    guild_data = get_guild_data(data, interaction.guild.id)
     members = guild_data["members"]
     username_lower = lichess_username.lower()
     if not any(v["username"] == username_lower for v in members.values()):
-        await ctx.send(f"❌ **{lichess_username}** is not on the leaderboard.")
+        await interaction.response.send_message(f"❌ **{lichess_username}** is not on the leaderboard.")
         return
     guild_data["members"] = {k: v for k, v in members.items() if v["username"] != username_lower}
     save_data(data)
-    await ctx.send(f"✅ **{lichess_username}** removed.")
+    await interaction.response.send_message(f"✅ **{lichess_username}** removed.")
 
-@bot.command(name="chesshelp")
-async def chess_help(ctx):
+@bot.tree.command(name="chesshelp", description="Show all available commands")
+async def chess_help(interaction: discord.Interaction):
     embed = discord.Embed(title="♟️ Chess Squad Bot — Commands", color=0x4a90d9)
-    embed.add_field(name="!setchannel",                 value="[Admin] Set leaderboard channel",  inline=False)
-    embed.add_field(name="!joinleaderboard <username>", value="Add your Lichess account",          inline=False)
-    embed.add_field(name="!leaderboard",                value="Show Rapid leaderboard",            inline=False)
-    embed.add_field(name="!blitzleaderboard",           value="Show Blitz leaderboard",            inline=False)
-    embed.add_field(name="!bulletleaderboard",          value="Show Bullet leaderboard",           inline=False)
-    embed.add_field(name="!gainleaderboard",            value="Show ELO gained this month",        inline=False)
-    embed.add_field(name="!members",                    value="List all registered members",       inline=False)
-    embed.add_field(name="!addmember <username>",       value="[Admin] Add a member",              inline=False)
-    embed.add_field(name="!removemember <username>",    value="[Admin] Remove a member",           inline=False)
-    embed.set_footer(text="Live leaderboard updates every 10 min • Resets monthly • Lichess Rapid")
-    await ctx.send(embed=embed)
+    embed.add_field(name="/setchannel",          value="[Admin] Set leaderboard channel",  inline=False)
+    embed.add_field(name="/joinleaderboard",     value="Add your Lichess account",          inline=False)
+    embed.add_field(name="/leaderboard",         value="Show Rapid leaderboard",            inline=False)
+    embed.add_field(name="/blitzleaderboard",    value="Show Blitz leaderboard",            inline=False)
+    embed.add_field(name="/bulletleaderboard",   value="Show Bullet leaderboard",           inline=False)
+    embed.add_field(name="/gainleaderboard",     value="Show ELO gained this month",        inline=False)
+    embed.add_field(name="/members",             value="List all registered members",       inline=False)
+    embed.add_field(name="/addmember",           value="[Admin] Add a member",              inline=False)
+    embed.add_field(name="/removemember",        value="[Admin] Remove a member",           inline=False)
+    embed.set_footer(text="Live leaderboard updates every 1 min • Resets monthly • Lichess Rapid")
+    await interaction.response.send_message(embed=embed)
 
 @set_channel.error
 @add_member.error
 @remove_member.error
-async def permission_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ You don't have permission to use this command.")
-
-@join_leaderboard.error
-@add_member.error
-async def missing_arg_error(ctx, error):
-    if isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send("❌ Please provide a Lichess username. Example: `!joinleaderboard YourLichessName`")
+async def permission_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("❌ You don't have permission to use this command.")
 
 if __name__ == "__main__":
     bot.run(TOKEN)
-
