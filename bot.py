@@ -2,32 +2,20 @@ import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 import aiohttp
-import json
 import os
 from datetime import datetime, timezone
 from dotenv import load_dotenv
+from supabase import create_client, Client
 
 load_dotenv()
 
-TOKEN     = os.getenv("DISCORD_TOKEN")
-DATA_FILE = "data.json"
+TOKEN          = os.getenv("DISCORD_TOKEN")
+SUPABASE_URL   = os.getenv("SUPABASE_URL")
+SUPABASE_KEY   = os.getenv("SUPABASE_KEY")
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 PAGE_SIZE = 10
-
-def load_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE) as f:
-            return json.load(f)
-    return {}
-
-def save_data(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-def get_guild_data(data, guild_id):
-    gid = str(guild_id)
-    if gid not in data:
-        data[gid] = {"channel_id": None, "members": {}, "leaderboard_message_id": None}
-    return data[gid]
 
 async def get_user_data(session, username):
     try:
@@ -76,20 +64,57 @@ async def fetch_ratings_bulk(usernames, mode="rapid"):
     qualified.sort(key=lambda x: x["rating"], reverse=True)
     return qualified + unqualified
 
+def get_guild_data(guild_id):
+    gid = str(guild_id)
+    result = supabase.table("guild_data").select("*").eq("guild_id", gid).execute()
+    if result.data:
+        return result.data[0]
+    supabase.table("guild_data").insert({"guild_id": gid, "channel_id": None, "leaderboard_message_id": None}).execute()
+    return {"guild_id": gid, "channel_id": None, "leaderboard_message_id": None}
+
+def get_members(guild_id):
+    gid = str(guild_id)
+    result = supabase.table("members").select("*").eq("guild_id", gid).execute()
+    return result.data or []
+
+def add_member_db(guild_id, discord_id, username, start_rating):
+    supabase.table("members").upsert({
+        "guild_id": str(guild_id),
+        "discord_id": str(discord_id),
+        "username": username.lower(),
+        "start_rating": start_rating
+    }).execute()
+
+def remove_member_db(guild_id, username):
+    supabase.table("members").delete().eq("guild_id", str(guild_id)).eq("username", username.lower()).execute()
+
+def set_channel_db(guild_id, channel_id):
+    gid = str(guild_id)
+    supabase.table("guild_data").upsert({
+        "guild_id": gid,
+        "channel_id": str(channel_id),
+        "leaderboard_message_id": None
+    }).execute()
+
+def set_leaderboard_message(guild_id, message_id):
+    supabase.table("guild_data").update({
+        "leaderboard_message_id": str(message_id)
+    }).eq("guild_id", str(guild_id)).execute()
+
 def build_leaderboard_pages(ratings, members, mode="rapid"):
     medals = ["🥇", "🥈", "🥉"]
     qualified = [r for r in ratings if r["games"] >= 4]
     unqualified = [r for r in ratings if r["games"] < 4]
-    
+
     lines = []
     for i, entry in enumerate(qualified):
         rank = medals[i] if i < 3 else f"`#{i+1}`"
         rating_display = str(entry["rating"])
         start = None
         if mode == "rapid":
-            for v in members.values():
-                if v["username"].lower() == entry["username"].lower():
-                    start = v.get("start_rating")
+            for m in members:
+                if m["username"].lower() == entry["username"].lower():
+                    start = m.get("start_rating")
                     break
         if start and isinstance(entry["rating"], int):
             diff = entry["rating"] - start
@@ -98,29 +123,29 @@ def build_leaderboard_pages(ratings, members, mode="rapid"):
         else:
             gain = ""
         lines.append(f"{rank} **{entry['username']}** — {rating_display}{gain}")
-    
+
     for entry in unqualified:
         rating_display = str(entry["rating"]) if isinstance(entry["rating"], int) else "—"
         lines.append(f"⏳ **{entry['username']}** — {rating_display} *(needs 4+ games)*")
-    
+
     pages = []
     for i in range(0, max(len(lines), 1), PAGE_SIZE):
         pages.append(lines[i:i+PAGE_SIZE])
     return pages
 
-async def build_leaderboard_embed(guild_data, mode="rapid", page=0):
-    members = guild_data.get("members", {})
+async def build_leaderboard_embed(guild_id, mode="rapid", page=0):
+    members = get_members(guild_id)
     if not members:
         return None, None, "No members registered yet."
-    usernames = [v["username"] for v in members.values()]
+    usernames = [m["username"] for m in members]
     ratings = await fetch_ratings_bulk(usernames, mode)
     if not ratings:
         return None, None, "Could not fetch ratings from Lichess."
-    
+
     pages = build_leaderboard_pages(ratings, members, mode)
     total_pages = len(pages)
     page = max(0, min(page, total_pages - 1))
-    
+
     mode_display = mode.capitalize()
     embed = discord.Embed(
         title=f"♟️ Anime Soul Chess Squad — {mode_display} Leaderboard",
@@ -128,38 +153,38 @@ async def build_leaderboard_embed(guild_data, mode="rapid", page=0):
         color=0x4a90d9,
         timestamp=datetime.now(timezone.utc)
     )
-    embed.set_footer(text=f"Page {page+1}/{total_pages} • Lichess {mode_display} Rating • Updates every 3 minutes • ⏳ = needs 4+ games")
+    embed.set_footer(text=f"Page {page+1}/{total_pages} • Lichess {mode_display} Rating • Updates every 3 min • ⏳ = needs 4+ games")
     return embed, total_pages, None
 
-async def build_gain_embed(guild_data, page=0):
-    members = guild_data.get("members", {})
+async def build_gain_embed(guild_id, page=0):
+    members = get_members(guild_id)
     if not members:
         return None, None, "No members registered yet."
     gains = []
     async with aiohttp.ClientSession() as session:
-        for v in members.values():
-            username = v["username"]
-            start = v.get("start_rating")
+        for m in members:
+            username = m["username"]
+            start = m.get("start_rating")
             current, games = await get_user_data(session, username)
             if start and current and games >= 4:
                 gains.append({"username": username, "gain": current - start, "current": current})
     if not gains:
         return None, None, "No members with 4+ games yet."
     gains.sort(key=lambda x: x["gain"], reverse=True)
-    
+
     medals = ["🥇", "🥈", "🥉"]
     lines = []
     for i, entry in enumerate(gains):
         rank = medals[i] if i < 3 else f"`#{i+1}`"
         sign = "+" if entry["gain"] >= 0 else ""
         lines.append(f"{rank} **{entry['username']}** — {sign}{entry['gain']} ELO ({entry['current']} current)")
-    
+
     pages = []
     for i in range(0, max(len(lines), 1), PAGE_SIZE):
         pages.append(lines[i:i+PAGE_SIZE])
     total_pages = len(pages)
     page = max(0, min(page, total_pages - 1))
-    
+
     embed = discord.Embed(
         title="📈 ELO Gained This Month",
         description="\n".join(pages[page]),
@@ -170,9 +195,9 @@ async def build_gain_embed(guild_data, page=0):
     return embed, total_pages, None
 
 class LeaderboardView(discord.ui.View):
-    def __init__(self, guild_data, mode="rapid", page=0, gain=False):
+    def __init__(self, guild_id, mode="rapid", page=0, gain=False):
         super().__init__(timeout=60)
-        self.guild_data = guild_data
+        self.guild_id = guild_id
         self.mode = mode
         self.page = page
         self.gain = gain
@@ -189,9 +214,9 @@ class LeaderboardView(discord.ui.View):
 
     async def update(self, interaction: discord.Interaction):
         if self.gain:
-            embed, total_pages, error = await build_gain_embed(self.guild_data, self.page)
+            embed, total_pages, error = await build_gain_embed(self.guild_id, self.page)
         else:
-            embed, total_pages, error = await build_leaderboard_embed(self.guild_data, self.mode, self.page)
+            embed, total_pages, error = await build_leaderboard_embed(self.guild_id, self.mode, self.page)
         if error:
             await interaction.response.send_message(f"⚠️ {error}", ephemeral=True)
             return
@@ -206,15 +231,16 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 @tasks.loop(minutes=3)
 async def live_leaderboard():
-    data = load_data()
-    for guild_id, guild_data in data.items():
+    result = supabase.table("guild_data").select("*").execute()
+    for guild_data in result.data:
+        guild_id = guild_data["guild_id"]
         channel_id = guild_data.get("channel_id")
         if not channel_id:
             continue
         channel = bot.get_channel(int(channel_id))
         if not channel:
             continue
-        embed, total_pages, error = await build_leaderboard_embed(guild_data)
+        embed, total_pages, error = await build_leaderboard_embed(guild_id)
         if not embed:
             continue
         msg_id = guild_data.get("leaderboard_message_id")
@@ -224,12 +250,10 @@ async def live_leaderboard():
                 await msg.edit(embed=embed)
             else:
                 msg = await channel.send(embed=embed)
-                guild_data["leaderboard_message_id"] = str(msg.id)
-                save_data(data)
+                set_leaderboard_message(guild_id, msg.id)
         except discord.NotFound:
             msg = await channel.send(embed=embed)
-            guild_data["leaderboard_message_id"] = str(msg.id)
-            save_data(data)
+            set_leaderboard_message(guild_id, msg.id)
         except Exception as e:
             print(f"Leaderboard update error: {e}")
 
@@ -238,10 +262,11 @@ async def monthly_reset_and_announce():
     now = datetime.now(timezone.utc)
     if now.day != 1 or now.hour != 0:
         return
-    data = load_data()
-    for guild_id, guild_data in data.items():
+    result = supabase.table("guild_data").select("*").execute()
+    for guild_data in result.data:
+        guild_id = guild_data["guild_id"]
         channel_id = guild_data.get("channel_id")
-        members = guild_data.get("members", {})
+        members = get_members(guild_id)
         if not members:
             continue
 
@@ -252,9 +277,9 @@ async def monthly_reset_and_announce():
             if channel:
                 gains = []
                 async with aiohttp.ClientSession() as session:
-                    for v in members.values():
-                        username = v["username"]
-                        start = v.get("start_rating")
+                    for m in members:
+                        username = m["username"]
+                        start = m.get("start_rating")
                         current, games = await get_user_data(session, username)
                         if start and current and games >= 4:
                             gains.append({"username": username, "gain": current - start, "current": current})
@@ -277,11 +302,10 @@ async def monthly_reset_and_announce():
                     await channel.send(embed=embed)
 
         async with aiohttp.ClientSession() as session:
-            for v in members.values():
-                new_rating, _ = await get_user_data(session, v["username"])
+            for m in members:
+                new_rating, _ = await get_user_data(session, m["username"])
                 if new_rating:
-                    v["start_rating"] = new_rating
-        save_data(data)
+                    supabase.table("members").update({"start_rating": new_rating}).eq("guild_id", guild_id).eq("username", m["username"]).execute()
 
 @bot.event
 async def on_ready():
@@ -293,22 +317,16 @@ async def on_ready():
 @bot.tree.command(name="setchannel", description="Set this channel as the leaderboard channel")
 @app_commands.checks.has_permissions(manage_channels=True)
 async def set_channel(interaction: discord.Interaction):
-    data = load_data()
-    guild_data = get_guild_data(data, interaction.guild.id)
-    guild_data["channel_id"] = str(interaction.channel.id)
-    guild_data["leaderboard_message_id"] = None
-    save_data(data)
+    set_channel_db(interaction.guild.id, interaction.channel.id)
     await interaction.response.send_message(f"✅ Leaderboard channel set to {interaction.channel.mention}!")
 
 @bot.tree.command(name="joinleaderboard", description="Join the leaderboard with your Lichess username")
 @app_commands.describe(lichess_username="Your Lichess username")
 async def join_leaderboard(interaction: discord.Interaction, lichess_username: str):
     await interaction.response.defer()
-    data = load_data()
-    guild_data = get_guild_data(data, interaction.guild.id)
-    members = guild_data["members"]
+    members = get_members(interaction.guild.id)
     username_lower = lichess_username.lower()
-    if any(v["username"] == username_lower for v in members.values()):
+    if any(m["username"] == username_lower for m in members):
         await interaction.followup.send(f"⚠️ **{lichess_username}** is already on the leaderboard.")
         return
     async with aiohttp.ClientSession() as session:
@@ -316,8 +334,7 @@ async def join_leaderboard(interaction: discord.Interaction, lichess_username: s
         if rating is None:
             await interaction.followup.send(f"❌ Could not find **{lichess_username}** on Lichess.")
             return
-    members[str(interaction.user.id)] = {"username": username_lower, "start_rating": rating}
-    save_data(data)
+    add_member_db(interaction.guild.id, interaction.user.id, username_lower, rating)
     if games < 4:
         await interaction.followup.send(f"✅ {interaction.user.mention} joined as **{lichess_username}**! Starting rating: **{rating}** ⏳ Play 4+ Rapid games to appear in rankings.")
     else:
@@ -326,13 +343,11 @@ async def join_leaderboard(interaction: discord.Interaction, lichess_username: s
 @bot.tree.command(name="leaderboard", description="Show the Rapid rating leaderboard")
 async def show_leaderboard(interaction: discord.Interaction):
     await interaction.response.defer()
-    data = load_data()
-    guild_data = get_guild_data(data, interaction.guild.id)
-    embed, total_pages, error = await build_leaderboard_embed(guild_data, mode="rapid", page=0)
+    embed, total_pages, error = await build_leaderboard_embed(interaction.guild.id, mode="rapid", page=0)
     if error:
         await interaction.followup.send(f"⚠️ {error}")
         return
-    view = LeaderboardView(guild_data, mode="rapid", page=0)
+    view = LeaderboardView(interaction.guild.id, mode="rapid", page=0)
     view.previous.disabled = True
     if total_pages <= 1:
         view.next.disabled = True
@@ -341,13 +356,11 @@ async def show_leaderboard(interaction: discord.Interaction):
 @bot.tree.command(name="blitzleaderboard", description="Show the Blitz rating leaderboard")
 async def show_blitz_leaderboard(interaction: discord.Interaction):
     await interaction.response.defer()
-    data = load_data()
-    guild_data = get_guild_data(data, interaction.guild.id)
-    embed, total_pages, error = await build_leaderboard_embed(guild_data, mode="blitz", page=0)
+    embed, total_pages, error = await build_leaderboard_embed(interaction.guild.id, mode="blitz", page=0)
     if error:
         await interaction.followup.send(f"⚠️ {error}")
         return
-    view = LeaderboardView(guild_data, mode="blitz", page=0)
+    view = LeaderboardView(interaction.guild.id, mode="blitz", page=0)
     view.previous.disabled = True
     if total_pages <= 1:
         view.next.disabled = True
@@ -356,13 +369,11 @@ async def show_blitz_leaderboard(interaction: discord.Interaction):
 @bot.tree.command(name="bulletleaderboard", description="Show the Bullet rating leaderboard")
 async def show_bullet_leaderboard(interaction: discord.Interaction):
     await interaction.response.defer()
-    data = load_data()
-    guild_data = get_guild_data(data, interaction.guild.id)
-    embed, total_pages, error = await build_leaderboard_embed(guild_data, mode="bullet", page=0)
+    embed, total_pages, error = await build_leaderboard_embed(interaction.guild.id, mode="bullet", page=0)
     if error:
         await interaction.followup.send(f"⚠️ {error}")
         return
-    view = LeaderboardView(guild_data, mode="bullet", page=0)
+    view = LeaderboardView(interaction.guild.id, mode="bullet", page=0)
     view.previous.disabled = True
     if total_pages <= 1:
         view.next.disabled = True
@@ -371,13 +382,11 @@ async def show_bullet_leaderboard(interaction: discord.Interaction):
 @bot.tree.command(name="gainleaderboard", description="Show who gained the most ELO this month")
 async def show_gain_leaderboard(interaction: discord.Interaction):
     await interaction.response.defer()
-    data = load_data()
-    guild_data = get_guild_data(data, interaction.guild.id)
-    embed, total_pages, error = await build_gain_embed(guild_data, page=0)
+    embed, total_pages, error = await build_gain_embed(interaction.guild.id, page=0)
     if error:
         await interaction.followup.send(f"⚠️ {error}")
         return
-    view = LeaderboardView(guild_data, gain=True, page=0)
+    view = LeaderboardView(interaction.guild.id, gain=True, page=0)
     view.previous.disabled = True
     if total_pages <= 1:
         view.next.disabled = True
@@ -385,13 +394,11 @@ async def show_gain_leaderboard(interaction: discord.Interaction):
 
 @bot.tree.command(name="members", description="List all registered members")
 async def list_members(interaction: discord.Interaction):
-    data = load_data()
-    guild_data = get_guild_data(data, interaction.guild.id)
-    members = guild_data.get("members", {})
+    members = get_members(interaction.guild.id)
     if not members:
         await interaction.response.send_message("No members yet. Use `/joinleaderboard` to join.")
         return
-    names = "\n".join([f"• {v['username']}" for v in sorted(members.values(), key=lambda x: x['username'])])
+    names = "\n".join([f"• {m['username']}" for m in sorted(members, key=lambda x: x['username'])])
     embed = discord.Embed(title="♟️ Registered Squad Members", description=names, color=0x1a1a2e)
     embed.set_footer(text=f"{len(members)} members total")
     await interaction.response.send_message(embed=embed)
@@ -401,11 +408,9 @@ async def list_members(interaction: discord.Interaction):
 @app_commands.checks.has_permissions(manage_messages=True)
 async def add_member(interaction: discord.Interaction, lichess_username: str):
     await interaction.response.defer()
-    data = load_data()
-    guild_data = get_guild_data(data, interaction.guild.id)
-    members = guild_data["members"]
+    members = get_members(interaction.guild.id)
     username_lower = lichess_username.lower()
-    if any(v["username"] == username_lower for v in members.values()):
+    if any(m["username"] == username_lower for m in members):
         await interaction.followup.send(f"⚠️ **{lichess_username}** is already on the leaderboard.")
         return
     async with aiohttp.ClientSession() as session:
@@ -413,23 +418,19 @@ async def add_member(interaction: discord.Interaction, lichess_username: str):
         if rating is None:
             await interaction.followup.send(f"❌ Could not find **{lichess_username}** on Lichess.")
             return
-    members[username_lower] = {"username": username_lower, "start_rating": rating}
-    save_data(data)
+    add_member_db(interaction.guild.id, username_lower, username_lower, rating)
     await interaction.followup.send(f"✅ **{lichess_username}** added! Starting rating: **{rating}**")
 
 @bot.tree.command(name="removemember", description="Remove a member from the leaderboard")
 @app_commands.describe(lichess_username="Lichess username to remove")
 @app_commands.checks.has_permissions(manage_messages=True)
 async def remove_member(interaction: discord.Interaction, lichess_username: str):
-    data = load_data()
-    guild_data = get_guild_data(data, interaction.guild.id)
-    members = guild_data["members"]
+    members = get_members(interaction.guild.id)
     username_lower = lichess_username.lower()
-    if not any(v["username"] == username_lower for v in members.values()):
+    if not any(m["username"] == username_lower for m in members):
         await interaction.response.send_message(f"❌ **{lichess_username}** is not on the leaderboard.")
         return
-    guild_data["members"] = {k: v for k, v in members.items() if v["username"] != username_lower}
-    save_data(data)
+    remove_member_db(interaction.guild.id, username_lower)
     await interaction.response.send_message(f"✅ **{lichess_username}** removed.")
 
 @bot.tree.command(name="chesshelp", description="Show all available commands")
